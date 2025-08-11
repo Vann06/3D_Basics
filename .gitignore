@@ -1,0 +1,11 @@
+# Ignorar compilados
+/target
+*.exe
+*.dll
+*.pdb
+*.obj
+
+# Ignorar backups y temporales
+*.tmp
+*.log
+
