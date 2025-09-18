@@ -9,3 +9,7 @@ debug = false
 
 [dependencies]
 raylib = "5.5.1"
+rand = "0.8"
+rodio = { version = "0.17", default-features = true }
+
+
