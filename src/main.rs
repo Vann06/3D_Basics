@@ -220,7 +220,7 @@ fn main() {
 
     let (mut window, raylib_thread) = raylib::init()
         .size(window_width, window_height)
-        .title("Raycaster Example")
+        .title("Teto´s Escape Game")
         .build();
 
     window.disable_cursor();
