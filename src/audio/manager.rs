@@ -1,3 +1,10 @@
+//! Audio playback and SFX management (rodio).
+//!
+//! Responsibilities:
+//! - Load background music and sound effects from assets (with fallbacks)
+//! - Provide helpers to play one-shot and looped sounds with optional volume scaling
+//! - Maintain separate sinks for SFX categories (steps, loops, general)
+//!
 use std::{fs::File, io::Read, io::BufReader, time::{Instant, Duration}, sync::Arc};
 use rodio::{OutputStream, OutputStreamHandle, Sink, Decoder};
 use rodio::Source;
@@ -111,12 +118,11 @@ impl AudioManager {
     }
 
     pub fn play_orb(&self) {
-        // Play on its own sink so multiple pickups in the same frame all trigger immediately
         if let Some(d) = self.orb.clone() {
             if let Ok(dec) = Decoder::new(BufReader::new(Cursor::new(d.as_ref().clone()))) {
                 if let Ok(sink) = Sink::try_new(&self.handle) {
                     sink.append(dec.amplify(self.orb_volume.clamp(0.0, 2.5)));
-                    sink.detach(); // let it play independently even if we drop our handle to it
+                    sink.detach();
                 }
             }
         }
@@ -134,7 +140,6 @@ impl AudioManager {
         self.last_player_step = Instant::now();
     }
     pub fn stop_player_steps(&mut self) {
-        // Immediately cut any queued/playing footstep audio
         self.foot_sink.stop();
         if let Ok(new_sink) = Sink::try_new(&self.handle) {
             self.foot_sink = new_sink;
@@ -146,15 +151,12 @@ impl AudioManager {
             self.play_data(self.enemy_step.clone());
         }
     }
-
-    /// Enemy step with volume scaling (1.0 at base, louder when closer)
     pub fn play_enemy_step_with_volume(&mut self, volume: f32) {
         if self.last_enemy_step.elapsed() >= self.step_interval_enemy {
             self.last_enemy_step = Instant::now();
             self.play_data_with_volume(self.enemy_step.clone(), volume);
         }
     }
-
     fn play_data(&self, data: Option<Arc<Vec<u8>>>) {
         if let Some(d) = data {
             if let Ok(dec) = Decoder::new(BufReader::new(Cursor::new(d.as_ref().clone()))) {
@@ -162,7 +164,6 @@ impl AudioManager {
             }
         }
     }
-
     fn play_data_with_volume(&self, data: Option<Arc<Vec<u8>>>, vol: f32) {
         if let Some(d) = data {
             if let Ok(dec) = Decoder::new(BufReader::new(Cursor::new(d.as_ref().clone()))) {
@@ -171,12 +172,7 @@ impl AudioManager {
             }
         }
     }
-
-    pub fn play_player_alert(&self) {
-        // Play player alert quieter
-        self.play_data_with_volume(self.player_alert.clone(), 0.55);
-    }
-
+    pub fn play_player_alert(&self) { self.play_data_with_volume(self.player_alert.clone(), 0.55); }
     fn play_data_on_foot(&self, data: Option<Arc<Vec<u8>>>) {
         if let Some(d) = data {
             if let Ok(dec) = Decoder::new(BufReader::new(Cursor::new(d.as_ref().clone()))) {
@@ -184,7 +180,6 @@ impl AudioManager {
             }
         }
     }
-
     pub fn play_music_loop(&mut self, path: &str) {
         if self.bg_sink.is_some() { return; }
         if let Some(bytes) = load_bytes(path) {
@@ -197,7 +192,6 @@ impl AudioManager {
             }
         }
     }
-
     pub fn play_music_loop_auto(&mut self) {
         if self.bg_sink.is_some() { return; }
         let candidates = [
@@ -217,14 +211,8 @@ impl AudioManager {
             }
         }
     }
-
     pub fn update(&self) { /* sinks auto-play */ }
-
-    pub fn play_player_caught(&self) {
-        self.play_data(self.player_caught.clone());
-    }
-
-    // ===== Looped alerts while seen =====
+    pub fn play_player_caught(&self) { self.play_data(self.player_caught.clone()); }
     pub fn start_enemy_seen_loop(&mut self) {
         if self.seen_loop_sink.is_some() { return; }
         if let Some(bytes) = self.enemy_seen.clone() {
@@ -237,10 +225,7 @@ impl AudioManager {
             }
         }
     }
-    pub fn stop_enemy_seen_loop(&mut self) {
-        if let Some(s) = self.seen_loop_sink.take() { s.stop(); }
-    }
-
+    pub fn stop_enemy_seen_loop(&mut self) { if let Some(s) = self.seen_loop_sink.take() { s.stop(); } }
     pub fn start_player_alert_loop(&mut self, volume: f32) {
         if self.player_alert_loop_sink.is_some() { return; }
         if let Some(bytes) = self.player_alert.clone() {
@@ -253,7 +238,5 @@ impl AudioManager {
             }
         }
     }
-    pub fn stop_player_alert_loop(&mut self) {
-        if let Some(s) = self.player_alert_loop_sink.take() { s.stop(); }
-    }
+    pub fn stop_player_alert_loop(&mut self) { if let Some(s) = self.player_alert_loop_sink.take() { s.stop(); } }
 }

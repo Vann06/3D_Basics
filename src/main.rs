@@ -1,36 +1,39 @@
+//! Game entry point and loop.
+//!
+//! Responsibilities:
+//! - Initialize window, audio, textures, framebuffer, and levels
+//! - Run the main update/draw loop and manage `GameState`
+//! - Handle input (delegated to `process_events`), enemy updates, orb collection
+//! - Orchestrate 3D render (`render3d`), sprites, flashlight overlay, HUD, and minimap
+//! - Maintain internal render scaling for performance and upload framebuffer to a texture
+//!
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
-mod line;
-mod framebuffer;
-mod maze;
-mod player;
-mod process_events;
-mod casters;
-mod textures;
-mod render3d;
-mod enemy;
-mod audio_manager;
+mod render;
+mod core;
+mod audio;
 
-use textures::TextureManager;
+use crate::render::textures::TextureManager;
 use raylib::prelude::*;
-use audio_manager::AudioManager;
+use crate::audio::manager::AudioManager;
 use std::thread;
 use std::time::Duration;
-use framebuffer::Framebuffer;
-use maze::{Maze, load_maze};
-use player::Player;
-use process_events::process_events;
-use casters::cast_ray;
-use render3d::{render_3d, draw_sprite_world, draw_sprites_sorted};
+use crate::render::framebuffer::Framebuffer;
+use crate::core::maze::{Maze, load_maze};
+use crate::core::player::Player;
+use crate::core::process_events::process_events;
+use crate::render::casters::cast_ray;
+use crate::render::render3d::render_3d;
+use crate::render::sprites::{draw_sprite_world, draw_sprites_sorted};
 use rand::seq::SliceRandom;
-use enemy::Enemy;
+use crate::core::enemy::Enemy;
 use std::path::Path;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum GameState { Menu, Playing, Escaping, Won, Caught }
 
-// Simplified menu: just "Play". We keep enum stub if needed.
+// Menu state: simple "Play" entry that cycles through preset levels.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum MenuItem { Play }
 
@@ -48,8 +51,8 @@ fn level_cfg(idx: i32) -> LevelCfg {
     0 => LevelCfg { file: "maze1.txt", enemy_enabled: true,  show_minimap: true,  brightness: 1.0 },
     // L2: enemigo ON; brillo un poco más fuerte
     1 => LevelCfg { file: "maze2.txt", enemy_enabled: true,  show_minimap: true,  brightness: 1.15 },
-    // L3: sin minimapa; brillo más fuerte
-    2 => LevelCfg { file: "maze3.txt", enemy_enabled: true,  show_minimap: false, brightness: 1.30 },
+    // L3: enemigo ON; con minimapa; un poco más intenso
+    2 => LevelCfg { file: "maze3.txt", enemy_enabled: true,  show_minimap: true,  brightness: 1.25 },
     _ => LevelCfg { file: "maze1.txt", enemy_enabled: true,  show_minimap: true,  brightness: 1.0 },
     }
 }
@@ -60,12 +63,12 @@ pub const BLOCK: f32 = 64.0;
 // ---------- ORBS ----------
 struct Orb { x: f32, y: f32, active: bool }
 
-fn is_free_cell(maze: &maze::Maze, i: usize, j: usize) -> bool {
+fn is_free_cell(maze: &Maze, i: usize, j: usize) -> bool {
     if j >= maze.len() || i >= maze[j].len() { return false; }
     let c = maze[j][i];
     c == ' ' || c == 'g'
 }
-fn is_safe_cell(maze: &maze::Maze, i: usize, j: usize) -> bool {
+fn is_safe_cell(maze: &Maze, i: usize, j: usize) -> bool {
     if !is_free_cell(maze, i, j) { return false; }
     let dirs = [(-1,0),(1,0),(0,-1),(0,1)];
     for (dx,dy) in dirs {
@@ -80,7 +83,7 @@ fn is_safe_cell(maze: &maze::Maze, i: usize, j: usize) -> bool {
     }
     true
 }
-fn spawn_orbs_in_empty_cells(maze: &maze::Maze, block: f32, count: usize) -> Vec<Orb> {
+fn spawn_orbs_in_empty_cells(maze: &Maze, block: f32, count: usize) -> Vec<Orb> {
     let mut free_cells: Vec<(usize,usize)> = Vec::new();
     for (j, row) in maze.iter().enumerate() {
         for (i, _c) in row.iter().enumerate() {
@@ -235,7 +238,7 @@ fn main() {
     let mut framebuffer = Framebuffer::new(fb_w as u32, fb_h as u32);
     framebuffer.set_background_color(Color::new(20, 20, 30, 255));
 
-    // textura persistente para blitear el framebuffer cada frame
+    // Textura persistente para blitear el framebuffer cada frame
     let img = Image::gen_image_color(fb_w, fb_h, Color::BLACK);
     let mut fb_tex = window
         .load_texture_from_image(&raylib_thread, &img)
@@ -250,7 +253,7 @@ fn main() {
     enemy.active = false; // spawn retardado
     let mut enemy_spawn_timer: f32 = 1.8; // aparece tras ~1.8s
     let mut level_start_time = window.get_time() as f32;
-    // Preload teto.gif texture for menu (single frame; GIF animation not handled)
+    // Preload `teto.gif` for the menu (single frame; GIF animation not handled)
     let tex_teto = Image::load_image("assets/teto.gif")
         .ok()
         .and_then(|img| window.load_texture_from_image(&raylib_thread, &img).ok());
@@ -260,7 +263,7 @@ fn main() {
     let mut game_state = GameState::Menu;
     // Simplified menu: Enter starts next level; no menu index needed
 
-    // para delta time
+    // Delta time tracking
     let mut last_time = window.get_time();
 
     while !window.window_should_close() {
@@ -272,6 +275,10 @@ fn main() {
     // Menu input & drawing
     let mut touched_exit = false;
     if matches!(game_state, GameState::Menu) {
+        // Level selection shortcuts on menu
+        if window.is_key_pressed(KeyboardKey::KEY_ONE) { selected_level = 0; }
+        if window.is_key_pressed(KeyboardKey::KEY_TWO) { selected_level = 1; }
+        if window.is_key_pressed(KeyboardKey::KEY_THREE) { selected_level = 2; }
         if window.is_key_pressed(KeyboardKey::KEY_ENTER) || window.is_key_pressed(KeyboardKey::KEY_KP_ENTER) {
             let start_idx = selected_level.clamp(0, 2);
             cfg = level_cfg(start_idx);
@@ -279,14 +286,15 @@ fn main() {
             let (o, s, p, e) = reset_game(&maze, block_size);
             orbs = o; score = s; player = p; enemy = e;
             enemy.active = false;
-            enemy_spawn_timer = if start_idx == 0 { 0.5 } else { 12.0 };
+            // Spawn earlier on L1 and L2; keep later on L3
+            enemy_spawn_timer = if start_idx == 0 || start_idx == 1 { 0.5 } else { 12.0 };
             level_start_time = window.get_time() as f32;
             game_state = GameState::Playing;
             // Next time in menu, advance to next level
             selected_level = (start_idx + 1) % 3;
         }
     } else {
-        // Entrada jugador solo cuando estamos jugando/escapando; bloqueado si "Caught"
+    // Entrada jugador solo cuando estamos jugando/escapando; bloqueado si "Caught"
         if matches!(game_state, GameState::Playing | GameState::Escaping) {
             touched_exit = process_events(&mut window, &mut player, &maze, block_size);
         }
@@ -297,7 +305,7 @@ fn main() {
         }
     }
 
-        // Lógica de enemigo
+    // Lógica de enemigo
         if matches!(game_state, GameState::Playing | GameState::Escaping) {
             // activar enemigo tras un pequeño retraso, y colocarlo lejos del jugador
             if cfg.enemy_enabled {
@@ -312,27 +320,72 @@ fn main() {
                     let progress_gate = collected >= mid_orbs;
                     if enemy_spawn_timer <= 0.0 || time_gate || progress_gate {
                         enemy.active = true;
-                        // buscar celda libre lejana
-                        let mut best: Option<(usize,usize,f32)> = None;
-                        for (j,row) in maze.iter().enumerate() {
-                            for (i,&c) in row.iter().enumerate() {
-                                if c == ' ' {
-                                    let wx = (i as f32 + 0.5) * BLOCK;
-                                    let wy = (j as f32 + 0.5) * BLOCK;
-                                    let dx = wx - player.pos.x; let dy = wy - player.pos.y;
-                                    let d2 = dx*dx + dy*dy;
-                                    // al menos 10-12 celdas de distancia
-                                    if d2 > 10.0*BLOCK*10.0*BLOCK {
-                                        if best.map(|b| d2 > b.2).unwrap_or(true) {
-                                            best = Some((i,j,d2));
+                        // Prefer spawn near the exit on Level 2, otherwise far from player
+                        let mut placed = false;
+                        if selected_level == 1 {
+                            // buscar 'g' y elegir una celda libre en un anillo alrededor
+                            let mut exit_pos: Option<(usize,usize)> = None;
+                            'outer: for (j,row) in maze.iter().enumerate() {
+                                for (i,&c) in row.iter().enumerate() {
+                                    if c == 'g' { exit_pos = Some((i,j)); break 'outer; }
+                                }
+                            }
+                            if let Some((gi, gj)) = exit_pos {
+                                let h = maze.len();
+                                let w = maze[0].len();
+                                // probar anillos de radio 1..=6, eligiendo el más lejos del jugador dentro del primer anillo con candidatos
+                                for r in 1..=6 {
+                                    let mut ring_best: Option<(usize,usize,f32)> = None;
+                                    let r_i = r as isize;
+                                    for dy in -r_i..=r_i {
+                                        for dx in -r_i..=r_i {
+                                            if dx.abs().max(dy.abs()) != r_i { continue; }
+                                            let ii = gi as isize + dx;
+                                            let jj = gj as isize + dy;
+                                            if ii < 0 || jj < 0 { continue; }
+                                            let (ii, jj) = (ii as usize, jj as usize);
+                                            if jj >= h || ii >= maze[jj].len() { continue; }
+                                            if maze[jj][ii] != ' ' { continue; }
+                                            let wx = (ii as f32 + 0.5) * BLOCK;
+                                            let wy = (jj as f32 + 0.5) * BLOCK;
+                                            let dxp = wx - player.pos.x; let dyp = wy - player.pos.y;
+                                            let d2p = dxp*dxp + dyp*dyp;
+                                            // evitar spawns demasiado cerca del jugador (< 6 celdas)
+                                            if d2p < (6.0*BLOCK)*(6.0*BLOCK) { continue; }
+                                            if ring_best.map(|b| d2p > b.2).unwrap_or(true) {
+                                                ring_best = Some((ii,jj,d2p));
+                                            }
                                         }
+                                    }
+                                    if let Some((ii,jj,_)) = ring_best {
+                                        enemy.x = (ii as f32 + 0.5) * BLOCK;
+                                        enemy.y = (jj as f32 + 0.5) * BLOCK;
+                                        placed = true;
+                                        break;
                                     }
                                 }
                             }
                         }
-                        if let Some((i,j,_)) = best {
-                            enemy.x = (i as f32 + 0.5) * BLOCK;
-                            enemy.y = (j as f32 + 0.5) * BLOCK;
+                        if !placed {
+                            // fallback: buscar celda libre lejana al jugador
+                            let mut best: Option<(usize,usize,f32)> = None;
+                            for (j,row) in maze.iter().enumerate() {
+                                for (i,&c) in row.iter().enumerate() {
+                                    if c == ' ' {
+                                        let wx = (i as f32 + 0.5) * BLOCK;
+                                        let wy = (j as f32 + 0.5) * BLOCK;
+                                        let dx = wx - player.pos.x; let dy = wy - player.pos.y;
+                                        let d2 = dx*dx + dy*dy;
+                                        if d2 > 10.0*BLOCK*10.0*BLOCK {
+                                            if best.map(|b| d2 > b.2).unwrap_or(true) { best = Some((i,j,d2)); }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some((i,j,_)) = best {
+                                enemy.x = (i as f32 + 0.5) * BLOCK;
+                                enemy.y = (j as f32 + 0.5) * BLOCK;
+                            }
                         }
                     }
                 }
@@ -342,7 +395,7 @@ fn main() {
             }
         }
 
-        // Recoger orbs
+    // Recoger orbs
         {
             let pr = 18.0;
             for (_idx, o) in orbs.iter_mut().enumerate() {
@@ -358,7 +411,7 @@ fn main() {
             }
         }
 
-        // Estado de juego
+    // Estado de juego
     if game_state == GameState::Playing && !orbs.iter().any(|o| o.active) {
             game_state = GameState::Escaping;
         }
@@ -369,22 +422,61 @@ fn main() {
         framebuffer.clear();
 
         if matches!(game_state, GameState::Menu) {
-            // Menu screen: retro look (single Play that cycles levels)
+            // Menu screen: enhanced red-themed look with level list
             let mut d = window.begin_drawing(&raylib_thread);
-            d.clear_background(Color::BLACK);
-            // Title
+            // Background gradient (dark to deep red)
+            for i in 0..window_height {
+                let t = i as f32 / window_height as f32;
+                let r = (24.0 + 120.0 * t) as u8;
+                d.draw_line(0, i, window_width, i, Color::new(r, 8, 16, 255));
+            }
+            // Red vignette using rings
+            let cx = (window_width as f32) * 0.5;
+            let cy = (window_height as f32) * 0.5;
+            for k in 0..8 {
+                let alpha = (18 + k * 10) as u8;
+                let inner = (window_height as f32 * (0.55 + k as f32 * 0.03)).min(window_height as f32);
+                let outer = inner + 18.0;
+                d.draw_ring(
+                    Vector2 { x: cx, y: cy },
+                    inner as f32,
+                    outer as f32,
+                    0.0,
+                    360.0,
+                    72,
+                    Color::new(220, 20, 40, alpha),
+                );
+            }
+            // Title with red glow (fake blur by layered text)
             let title = "Teto Escape";
             let ts = 64;
             let tw = d.measure_text(title, ts);
-            d.draw_text(title, (window_width - tw)/2 - 150, 60, ts, Color::new(255, 240, 120, 255));
-            // Single Play option with preview of next level
-            let base_x = 120; let base_y = 240;
-            let label = format!("Play (Level {})", (selected_level % 3) + 1);
-            d.draw_text(&label, base_x, base_y, 40, Color::YELLOW);
-            d.draw_text("ENTER: Play  |  ESC: Exit", base_x, base_y + 56, 22, Color::new(200,200,200,255));
-            // Right panel for teto.gif with slight bobbing animation
-            let panel_x = (window_width as f32 * 0.60) as i32;
-            d.draw_rectangle(panel_x, 0, window_width - panel_x, window_height, Color::new(16, 16, 24, 255));
+            let tx = (window_width - tw)/2 - 150;
+            let ty = 60;
+            for (ox, oy, col) in [(-2,0, Color::new(255,50,80,120)), (2,0, Color::new(255,50,80,120)), (0,2, Color::new(255,50,80,120)), (0,-2, Color::new(255,50,80,120))] {
+                d.draw_text(title, tx+ox, ty+oy, ts, col);
+            }
+            d.draw_text(title, tx, ty, ts, Color::new(255, 230, 210, 255));
+
+            // Left panel: level list
+            let base_x = 100; let base_y = 220;
+            d.draw_text("Select Level:", base_x, base_y - 40, 28, Color::new(255, 200, 200, 255));
+            for i in 0..3 {
+                let y = base_y + i * 48;
+                let selected = i == selected_level.clamp(0,2);
+                let label = format!("Level {}", i+1);
+                if selected {
+                    d.draw_rectangle(base_x - 16, y - 6, 200, 40, Color::new(160, 20, 30, 160));
+                    d.draw_text(&label, base_x, y, 36, Color::new(255, 100, 120, 255));
+                } else {
+                    d.draw_text(&label, base_x, y, 34, Color::new(230, 220, 220, 220));
+                }
+            }
+            d.draw_text("1/2/3: Choose | ENTER: Play | ESC: Exit", base_x, base_y + 3*48 + 20, 22, Color::new(230,230,230,220));
+
+            // Right panel for teto.gif with slight bobbing animation & red tint
+            let panel_x = (window_width as f32 * 0.55) as i32;
+            d.draw_rectangle(panel_x, 0, window_width - panel_x, window_height, Color::new(24, 10, 12, 200));
             if let Some(tex) = &tex_teto {
                 let tex_w = tex.width(); let tex_h = tex.height();
                 let target_w = window_width - panel_x - 20; let target_h = window_height - 20;
@@ -400,7 +492,9 @@ fn main() {
                     Rectangle { x: dx as f32, y: dy as f32, width: draw_w as f32, height: draw_h as f32 },
                     Vector2 { x: 0.0, y: 0.0 },
                     0.0,
-                    Color::WHITE);
+                    Color::new(255, 200, 200, 255));
+                // Soft red overlay for a subtle blur feel
+                d.draw_rectangle(dx-12, dy-12, draw_w+24, draw_h+24, Color::new(200, 30, 50, 40));
             } else {
                 let msg = "Missing assets/teto.gif";
                 let tw = d.measure_text(msg, 24);
@@ -432,12 +526,9 @@ fn main() {
             let near = dist_now < 200.0;
             let panic_mode = enemy_sees || near;
             texman.set_alert_mode(panic_mode);
-            // sin tinte verde en el enemigo cuando persigue
+            // Sin tinte verde en el enemigo cuando persigue
 
-            // Reemplaza esta llamada:
-            // render_3d(&mut framebuffer, &maze, block_size, &player, &texman, &mut zbuffer);
-
-            // Por esta:
+            // Render principal
             render_3d(
                 &mut framebuffer,
                 &maze,
@@ -473,22 +564,22 @@ fn main() {
                 let radius = (0.60 + 0.25 * t).min(0.85);
                 framebuffer.apply_circular_blur(strength, passes, radius);
             }
-            // Removed framebuffer vignette; flashlight overlay is drawn later on top
+            // Flashlight overlay is drawn later to sit above the world
 
             // sprites depth-sorted
             let mut sprites: Vec<(&str, f32, f32, char, f32, f32)> = Vec::new();
             for (_idx, o) in orbs.iter().enumerate().filter(|(_,o)| o.active).map(|(i,o)|(i,o)) {
+                // Orbs baseline at v_offset ~0.10
                 sprites.push(("orb", o.x, o.y, 'o', 28.0, 0.10));
             }
             if cfg.enemy_enabled && enemy.active {
-                // Siempre usar la imagen frontal (enemy_n.png)
-                // Bigger enemy so it fills better
-                sprites.push(("enemy", enemy.x, enemy.y, 'N', 90.0, 0.08));
+                // Enemy aligned at the same baseline as orbs for cohesion
+                sprites.push(("enemy", enemy.x, enemy.y, 'N', 90.0, 0.10));
             }
             draw_sprites_sorted(&mut framebuffer, &player, &texman, &zbuffer, &mut sprites);
         }
 
-        // HUD + MINIMAPA
+    // HUD + MINIMAPA
     let fps_now = window.get_fps();
     // Transición a estado Caught cuando el enemigo te alcanza
     if matches!(game_state, GameState::Playing | GameState::Escaping) && cfg.enemy_enabled {
@@ -505,7 +596,7 @@ fn main() {
             }
         }
         {
-            // Capture WASD state before borrowing window mutably for drawing (avoids borrow conflict)
+            // Capturar estado de WASD antes de pedir préstamo mutable de window para dibujar (evita conflicto)
             let wasd_state = (
                 window.is_key_down(KeyboardKey::KEY_W),
                 window.is_key_down(KeyboardKey::KEY_A),
@@ -517,15 +608,15 @@ fn main() {
 
             // Actualizar audio (no-op para rodio, placeholder)
             if let Some(a) = audio.as_ref() { a.update(); }
-            // Subir framebuffer a textura y dibujar de un golpe (mucho más rápido)
+            // Subir framebuffer a textura y dibujar de un golpe (rápido)
             framebuffer.upload_to_texture(&mut fb_tex);
-            // Scale the low-res framebuffer texture to the full window
+            // Escalar la textura low-res del framebuffer a la ventana completa
             let src = Rectangle { x: 0.0, y: 0.0, width: fb_tex.width() as f32, height: fb_tex.height() as f32 };
             let dst = Rectangle { x: 0.0, y: 0.0, width: window_width as f32, height: window_height as f32 };
             let origin = Vector2 { x: 0.0, y: 0.0 };
             d.draw_texture_pro(&fb_tex, src, dst, origin, 0.0, Color::WHITE);
 
-            // Footsteps SFX triggers strictly from WASD key movement
+            // Footsteps SFX solo cuando hay movimiento con WASD
             if let Some(a) = audio.as_mut() {
                 let moving_keys = { let (w,a_key,s,d_key) = wasd_state; w || a_key || s || d_key };
                 static mut WAS_MOVING: bool = false;
@@ -572,15 +663,15 @@ fn main() {
                 }
             }
 
-            // Flashlight-like overlay (draw BEFORE HUD/minimap so UI stays on top)
+            // Flashlight overlay (dibujar ANTES del HUD/minimapa para que la UI quede encima)
             {
-                // Center offset forward + camera shake when chased/seen
+                // Centro desplazado hacia delante + sacudida si te persigue/ve
                 let look_dx = player.a.cos();
                 let look_dy = player.a.sin();
                 let offset_px = 90.0;           // how far to push the light forward
-                // Determine visibility early for stronger shake & tighter light
+                // Determinar visibilidad para sacudida más fuerte y luz más cerrada
                 let seen = enemy.sees_player(&maze, player.pos.x, player.pos.y, block_size);
-                // Shake: amplitude increases a lot when seen/chasing, and when very near
+                // Sacudida: aumenta al ser visto/en persecución y al estar cerca
                 let chasing = enemy.is_chasing();
                 let dxp = enemy.x - player.pos.x;
                 let dyp = enemy.y - player.pos.y;
@@ -596,7 +687,7 @@ fn main() {
                 let shake_y = (ttime * 31.0).sin() * (shake_amp * 0.9);
                 let cx = (window_width as f32) * 0.5 + look_dx * offset_px + shake_x;
                 let cy = (window_height as f32) * 0.5 + look_dy * (offset_px * 0.45) + shake_y;
-                // shrink radius when seen and when closer
+                // Reducir radio al ser visto y cuando está más cerca
                 let dx = enemy.x - player.pos.x;
                 let dy = enemy.y - player.pos.y;
                 let dist = (dx*dx + dy*dy).sqrt();
@@ -608,15 +699,15 @@ fn main() {
                 let r0 = base_r * (1.0 - t) + min_r * t;
                 let hw = (window_width as f32) * 0.5;
                 let hh = (window_height as f32) * 0.5;
-                let r_max = (hw*hw + hh*hh).sqrt() + 64.0; // ensure corners fully covered
+                let r_max = (hw*hw + hh*hh).sqrt() + 64.0; // asegurar esquinas cubiertas
                 let segs: i32 = 96; // fewer segments for performance
-                // Apply a consistent 70% darkness outside the flashlight radius with a soft edge
+                // Aplicar ~70% de oscuridad fuera del radio con borde suave
                 let base_alpha: u8 = 178; // ~70% darkness (0.7 * 255)
                 let feather: f32 = 36.0;  // slightly narrower feather for fewer ring draws
                 let inner_soft_start = r0.max(0.0);
                 let inner_soft_end = (r0 + feather).min(r_max);
 
-                // 1) Soft edge: ramp up from 0 -> base_alpha across [r0 .. r0+feather]
+                // 1) Borde suave: de 0 -> base_alpha en [r0 .. r0+feather]
                 let steps = 6; // fewer steps to reduce draw calls
                 for s in 0..steps {
                     let t0 = s as f32 / steps as f32;
@@ -635,7 +726,7 @@ fn main() {
                     );
                 }
 
-                // 2) Solid outside: a single large ring at exactly 70% darkness
+                // 2) Sólido exterior: un anillo grande con ~70% de oscuridad
                 if inner_soft_end < r_max {
                     d.draw_ring(
                         Vector2 { x: cx, y: cy },
@@ -649,11 +740,27 @@ fn main() {
                 }
             }
 
-            // HUD
-            let real_fps = if dt > 0.000_01 { (1.0 / dt).round() as i32 } else { fps_now as i32 };
-            let ms = (dt * 1000.0).max(0.0);
-            d.draw_text(&format!("FPS: {}  |  real: {}  |  {:.1} ms", fps_now, real_fps, ms), 10, 10, 20, Color::WHITE);
-            // Tiny HUD diagnostics: audio status and seen flag
+            // Panic red tint overlay when seen or very near
+            {
+                let enemy_sees = enemy.sees_player(&maze, player.pos.x, player.pos.y, block_size);
+                let dx = enemy.x - player.pos.x;
+                let dy = enemy.y - player.pos.y;
+                let dist = (dx*dx + dy*dy).sqrt();
+                let near_t = (1.0 - (dist / 600.0)).clamp(0.0, 1.0);
+                if enemy_sees || near_t > 0.0 {
+                    // Blend intensity: stronger when seen, otherwise scale by proximity
+                    let base = if enemy_sees { 110 } else { 0 };
+                    let extra = (near_t * 120.0) as i32;
+                    let raw = base + extra;
+                    // 25% less intensity overall
+                    let alpha = ((raw as f32) * 0.75).round().clamp(0.0, 180.0) as u8;
+                    d.draw_rectangle(0, 0, window_width, window_height, Color::new(180, 10, 24, alpha));
+                }
+            }
+
+            // HUD: simple FPS only
+            d.draw_text(&format!("FPS: {}", fps_now), 10, 10, 20, Color::WHITE);
+            // HUD pequeño: estado de audio y bandera "Seen"
             let audio_ok = if audio.is_some() { "Audio: OK" } else { "Audio: OFF" };
             d.draw_text(audio_ok, 10, 30, 18, Color::WHITE);
             if enemy.sees_player(&maze, player.pos.x, player.pos.y, block_size) {
@@ -674,10 +781,40 @@ fn main() {
                     d.draw_text(msg, (window_width - tw)/2, 12, 22, Color::WHITE);
                 }
                 GameState::Won => {
-                    let msg = "¡Has escapado! ENTER: siguiente nivel | ESC: salir";
-                    let tw = d.measure_text(msg, 36);
-                    d.draw_rectangle(0, 0, window_width, window_height, Color::new(0,0,0,160));
-                    d.draw_text(msg, (window_width - tw)/2, window_height/2 - 18, 36, Color::YELLOW);
+                    // Style like the menu: red gradient + vignette + glowing text
+                    for i in 0..window_height {
+                        let t = i as f32 / window_height as f32;
+                        let r = (24.0 + 120.0 * t) as u8;
+                        d.draw_line(0, i, window_width, i, Color::new(r, 8, 16, 255));
+                    }
+                    let cx = (window_width as f32) * 0.5;
+                    let cy = (window_height as f32) * 0.5;
+                    for k in 0..6 {
+                        let alpha = (24 + k * 12) as u8;
+                        let inner = (window_height as f32 * (0.48 + k as f32 * 0.035)).min(window_height as f32);
+                        let outer = inner + 22.0;
+                        d.draw_ring(
+                            Vector2 { x: cx, y: cy },
+                            inner as f32,
+                            outer as f32,
+                            0.0,
+                            360.0,
+                            64,
+                            Color::new(220, 20, 40, alpha),
+                        );
+                    }
+                    let title = "You Escaped!";
+                    let ts = 60;
+                    let tw = d.measure_text(title, ts);
+                    let tx = (window_width - tw)/2;
+                    let ty = window_height/2 - 70;
+                    for (ox, oy, col) in [(-2,0, Color::new(255,50,80,120)), (2,0, Color::new(255,50,80,120)), (0,2, Color::new(255,50,80,120)), (0,-2, Color::new(255,50,80,120))] {
+                        d.draw_text(title, tx+ox, ty+oy, ts, col);
+                    }
+                    d.draw_text(title, tx, ty, ts, Color::new(255, 230, 210, 255));
+                    let hint = "ENTER: next level | ESC: exit";
+                    let hw = d.measure_text(hint, 28);
+                    d.draw_text(hint, (window_width - hw)/2, ty + 90, 28, Color::new(240, 220, 220, 255));
                 }
                 GameState::Caught => {
                     let msg = "GAME OVER - Te atrapó (ENTER: menú, ESC: salir)";
@@ -688,7 +825,7 @@ fn main() {
                 _ => {}
             }
 
-            // minimap (arriba derecha) según nivel — drawn after flashlight so it stays visible
+            // Minimap (arriba derecha) según nivel — dibujado después de la linterna para que permanezca visible
             if cfg.show_minimap {
                 draw_minimap(&mut d, &maze, &player, &orbs, &enemy, window_width);
             }
@@ -696,7 +833,7 @@ fn main() {
             // (overlay de Caught ya manejado en el match anterior)
         }
 
-        // salir/avanzar en pantallas finales
+    // Salir/avanzar en pantallas finales
         if game_state == GameState::Won && (window.is_key_pressed(KeyboardKey::KEY_ENTER) || window.is_key_pressed(KeyboardKey::KEY_KP_ENTER)) {
             // avanzar nivel y volver a menú
             selected_level = (selected_level + 1) % 3;
